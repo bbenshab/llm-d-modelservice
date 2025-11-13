@@ -1,0 +1,66 @@
+name: Lint and Test Charts
+
+on: pull_request
+
+jobs:
+  lint-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.2.0
+        with:
+          version: v3.17.0
+
+      - uses: actions/setup-python@v5.3.0
+        with:
+          python-version: '3.x'
+          check-latest: true
+
+      - name: Set up chart-testing
+        uses: helm/chart-testing-action@v2.7.0
+
+      - name: Run chart-testing (list-changed)
+        id: list-changed
+        run: |
+          changed=$(ct list-changed --target-branch ${{ github.event.repository.default_branch }})
+          if [[ -n "$changed" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Add Helm dependency repos
+        run: |
+          for dir in $(ls -d charts/*/); do
+            helm dependency list  --max-col-width 120 $dir 2> /dev/null | tail +2 | head -n -1 | awk '{ print "helm repo add " $1 " " $3 }' | while read cmd; do $cmd; done
+          done
+
+      - name: Run make lint for chart-testing
+        if: steps.list-changed.outputs.changed == 'true'
+        env:
+          TARGET_BRANCH: ${{ github.event.repository.default_branch }}
+        run: make lint
+
+      - name: Run make verify
+        run: make verify
+
+      - name: Create kind cluster
+        if: steps.list-changed.outputs.changed == 'true'
+        uses: helm/kind-action@v1.12.0
+
+      - name: Install CRDs
+        if: steps.list-changed.outputs.changed == 'true'
+        run: |
+          # Install Kubernetes Gateway API CRDs
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
+
+          # Install Kubernetes Gateway API Inference Extension CRDs
+          VERSION=v0.3.0
+          kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$VERSION/manifests.yaml
+
+      - name: Run chart-testing (install)
+        if: steps.list-changed.outputs.changed == 'true'
+        run: ct install --target-branch ${{ github.event.repository.default_branch }} --helm-extra-set-args "--set=accelerator.type=cpu"
